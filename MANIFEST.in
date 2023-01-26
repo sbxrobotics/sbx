@@ -1,0 +1,8 @@
+include sbx/py.typed
+include README.md
+include requirements.txt
+
+recursive-include sbx *.py
+recursive-include sbx *.sh
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]
