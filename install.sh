@@ -5,4 +5,5 @@
 
 cd "$(dirname "$0")"
 
-python3 setup.py clean --all install --user --force
+#python3 setup.py clean --all install --user --force
+pip install -e . --upgrade --force-reinstall

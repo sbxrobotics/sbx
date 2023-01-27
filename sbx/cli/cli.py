@@ -2,6 +2,10 @@
 import click
 from click.exceptions import ClickException
 
-@click.command()
+@click.group()
+def cli():
+    pass
+
+@cli.command()
 def hello():
     click.echo('Hello Rick Deckard.')
