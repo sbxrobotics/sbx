@@ -1,9 +1,11 @@
 #!/bin/bash
-# Usage: Installs the SBX Robotics CLI package
+
+# ----------------------------------------------------
+# Usage: Install the SBX Robotics CLI locally via pip
 # Author: SBX Robotics Inc.
-# -------------------------------------------------
+# ----------------------------------------------------
 
 cd "$(dirname "$0")"
 
-#python3 setup.py clean --all install --user --force
+# use pip to install the cli from the current directory (via setup.py)
 pip install -e . --upgrade --force-reinstall
