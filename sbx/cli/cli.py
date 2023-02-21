@@ -1,10 +1,15 @@
+
 #!/usr/bin/env python
+import os
+from enum import Enum
+from functools import wraps
+
 import click
 import requests
-import pprint
-import os
 import toml
-from functools import wraps
+from bson import ObjectId
+from bson.errors import InvalidId
+from tabulate import tabulate
 
 # TODO (T2600): Potentially support active context (i.e. checkout a project) to avoid having to specify ids each time.
 
@@ -17,6 +22,25 @@ if os.getenv('SBX_DEV'):
 
 CONFIG_DIR = os.path.expanduser('~/.config/sbx/')
 CONFIG_PATH = os.path.join(CONFIG_DIR, 'config.toml')
+
+
+class JobState(Enum):
+    # maintain correspondence between these codes and DatasetJobState in the api.
+    INIT = 1
+    GEN = 10
+    MERGE = 20
+    COCO = 30
+    SHIP = 40
+    ERROR = 1000
+
+    @classmethod
+    def get_name(cls, val):
+        return cls(val).name
+
+
+class SortOrder(Enum):
+    ASC = 10
+    DESC = 20
 
 #
 # Utility functions
@@ -46,6 +70,23 @@ def validate_key_format(hex):
     except:
         return False
 
+def check_object_id(value):
+    try:
+        _ = ObjectId(value)
+    except InvalidId:
+        click.echo(sbx_style("Ooops, malformed id"))
+        exit()
+
+
+def check_dataset_job_id(value):
+    try:
+        split = value.split('-')
+        assert len(split) > 2
+        _ = ObjectId(value.split('-')[-1])
+    except (InvalidId, AssertionError):
+        click.echo(sbx_style("Ooops, malformed dataset job id. make sure to enter an id from `sbx job list`"))
+        exit()
+
 
 def login_required(f):
     """enforces that we have a ~/.config/sbx/config.toml and loads it, then passes it
@@ -65,12 +106,12 @@ def login_required(f):
             click.echo(
                 sbx_style(f"It looks like you're not logged in. Please `sbx login` first."))
             return
-        f(config, *args, **kwargs)
+        return f(config, *args, **kwargs)
     return wrapper
 
 
 @login_required
-def sbx_post(cfg, route, key=None):
+def sbx_post(cfg, route, key=None, json=None):
     """post to a route and return a parsed json response
 
     Parameters
@@ -91,18 +132,20 @@ def sbx_post(cfg, route, key=None):
         key = cfg['api']['key']
     try:
         response = requests.post(SBX_API_URL_BASE + "/app-api/v0" + route, headers={
-                                 "Authorization": key, "AuthType": "API_KEY"}, verify=VERIFY)
+                                 "Authorization": key, "AuthType": "API_KEY"}, json=json, verify=VERIFY)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.HTTPError as e:
         if response.status_code == 401:
+            click.echo(sbx_style(response.text))
             click.echo(sbx_style(
-                f"API key is invalid. Please enter a key currently listed at {SBX_API_URL_BASE}/settings/account"))
+                f"Are you using an valid API key for the resource you are trying to access? Please enter a key currently listed at {SBX_API_URL_BASE}/settings/account"))
+        elif response.status_code == 400:
+            click.echo(sbx_style(response.json()['message']))
         elif response.status_code == 500:
-            click.echo(sbx_style(
-                f"Server Error: There was an internal server error. Please retry in a bit."))
+            click.echo(sbx_style("Internal Server Error: Please retry in a bit."))
         else:
-            print(e)
+            click.echo(sbx_style(str(e)))
         return None
 
 
@@ -187,31 +230,62 @@ def account(cfg):
 @project.command()
 def list():
     """list user projects"""
-
-    raise NotImplementedError
+    res = sbx_post("/projects/get", json={"sort": SortOrder.DESC.value})
+    if not res:
+        return
+    headers = ['Id', 'Date Created', 'Name']
+    rows = [(
+        proj['project_id'],
+        proj['created_str_utc'],
+        proj['name']
+    ) for proj in res['projects']]
+    print(tabulate(rows, headers=headers, tablefmt="grid"))
 
 
 @project.command()
-def info():
+@click.argument("project_id")
+def info(project_id):
     """show detailed info about a project"""
-    raise NotImplementedError
+    check_object_id(project_id)
+    res = sbx_post("/project/get", json={"id": project_id})
+    if not res:
+        return
+    print(tabulate([(k, v) for k, v in res.items()], tablefmt="grid"))
 
 
 #
 # Generator commands
 #
 
+@generator.command()
+@click.argument("project_id")
+def list(project_id):
+    """list all generators attached to a project
+    """
+    check_object_id(project_id)
+    res = sbx_post("/generators/get",
+                   json={"project_id": project_id, "sort": SortOrder.DESC.value})
+    if not res:
+        return
+    headers = ['Id', 'Name', 'Build Name']
+    rows = [(
+        gen['id'],
+        gen['name'],
+        gen['cur_build_name']
+    ) for gen in res['generators']]
+    print(tabulate(rows, headers=headers, tablefmt="grid"))
+
 
 @generator.command()
-def info():
-    """show detailed info about a particular generator"""
-    raise NotImplementedError
-
-
-@generator.command()
-def list():
-    """list all generators attached to a project"""
-    raise NotImplementedError
+@click.argument("generator_id")
+def info(generator_id):
+    """show detailed info about a particular generator
+    """
+    check_object_id(generator_id)
+    res = sbx_post("/generator/get", json={"id": generator_id})
+    if not res:
+        return
+    print(tabulate([(k, v) for k, v in res.items()], tablefmt="grid"))
 
 #
 # Dataset commands
@@ -219,9 +293,37 @@ def list():
 
 
 @dataset.command()
-def list():
-    """list all datasets belonging to a project"""
-    raise NotImplementedError
+@click.argument("project_id")
+def list(project_id):
+    """list all datasets belonging to a project
+    """
+    check_object_id(project_id)
+    res = sbx_post("/datasets/get",
+                   json={"project_id": project_id, "sort": SortOrder.DESC.value})
+    if not res:
+        return
+    headers = ['Id', 'Date Shipped', 'Name']
+    rows = [(
+        ds['id'],
+        ds['created_str_utc'],
+        ds['name']
+    ) for ds in res['datasets']]
+    print(tabulate(rows, headers=headers, tablefmt="grid"))
+
+
+@dataset.command()
+@click.argument("dataset_id")
+def info(dataset_id):
+    """show detailed info about a project
+    Note: dataset_id refers to the id shown in the dataset list command,
+    not the sbx internal id.
+    """
+    check_object_id(dataset_id)
+    res = sbx_post("/dataset/get", json={"id": dataset_id})
+    if not res:
+        return
+    print(tabulate([(k, v)
+          for k, v in res['dataset'].items()], tablefmt="grid"))
 
 
 @dataset.command()
@@ -235,6 +337,37 @@ def download():
 
 
 @job.command()
-def list():
-    """list current running and completed aws jobs"""
-    raise NotImplementedError
+@click.argument("project_id", default=None, required=False)
+def list(project_id):
+    """list current running and completed aws jobs
+    """
+    check_object_id(project_id)
+    query = {"sort": SortOrder.DESC.value}
+    if project_id:
+        query['project_id'] = project_id
+    res = sbx_post("/dataset-jobs/get",
+                   json=query)
+    if not res:
+        return
+    headers = ['Id', 'Created', 'Finished', 'Name', 'State']
+    rows = [(
+        ds['id'],
+        ds['created_utc'],
+        ds['finished_utc'],
+        ds['name'],
+        JobState.get_name(int(ds['state']))
+    ) for ds in res['dataset_jobs']]
+    print(tabulate(rows, headers=headers, tablefmt="grid"))
+
+
+@job.command()
+@click.argument("job_id")
+def info(job_id):
+    """list current running and completed aws jobs
+    """
+    check_dataset_job_id(job_id)
+    res = sbx_post("/dataset-job/get", json={"id": job_id})
+    if not res:
+        return
+    print(tabulate([(k, v)
+          for k, v in res['dataset_job'].items()], tablefmt="grid"))
