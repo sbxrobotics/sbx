@@ -1,15 +1,19 @@
 
 #!/usr/bin/env python
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
-from functools import wraps
+from functools import partial, wraps
+from urllib.parse import urlparse
 
+import boto3
 import click
 import requests
 import toml
 from bson import ObjectId
 from bson.errors import InvalidId
 from tabulate import tabulate
+from tqdm import tqdm
 
 # TODO (T2600): Potentially support active context (i.e. checkout a project) to avoid having to specify ids each time.
 
@@ -70,6 +74,7 @@ def validate_key_format(hex):
     except:
         return False
 
+
 def check_object_id(value):
     try:
         _ = ObjectId(value)
@@ -84,7 +89,8 @@ def check_dataset_job_id(value):
         assert len(split) > 2
         _ = ObjectId(value.split('-')[-1])
     except (InvalidId, AssertionError):
-        click.echo(sbx_style("Ooops, malformed dataset job id. make sure to enter an id from `sbx job list`"))
+        click.echo(sbx_style(
+            "Ooops, malformed dataset job id. make sure to enter an id from `sbx job list`"))
         exit()
 
 
@@ -143,7 +149,8 @@ def sbx_post(cfg, route, key=None, json=None):
         elif response.status_code == 400:
             click.echo(sbx_style(response.json()['message']))
         elif response.status_code == 500:
-            click.echo(sbx_style("Internal Server Error: Please retry in a bit."))
+            click.echo(
+                sbx_style("Internal Server Error: Please retry in a bit."))
         else:
             click.echo(sbx_style(str(e)))
         return None
@@ -326,10 +333,93 @@ def info(dataset_id):
           for k, v in res['dataset'].items()], tablefmt="grid"))
 
 
+def download_one_file(bucket: str, output: str, client: boto3.client, s3_file: str):
+    """
+    Download a single file from S3
+    Args:
+        bucket (str): S3 bucket where images are hosted
+        output (str): Dir to store the images
+        client (boto3.client): S3 client
+        s3_file (str): S3 object name
+    """
+    client.download_file(
+        Bucket=bucket, Key=s3_file, Filename=os.path.join(output, s3_file)
+    )
+
+
 @dataset.command()
-def download():
-    """download a dataset locally to a specified location"""
-    raise NotImplementedError
+@click.argument("dataset_id")
+@click.argument("download_dir")
+@click.option("-s", "--sample", is_flag=True, help="whether to download the full dataset or the smaller sample with 100 images")
+def download(dataset_id, download_dir, sample):
+    """download a dataset locally to a specified location
+    """
+    check_object_id(dataset_id)
+    # the only credential we need to store locally is the API key
+    res = sbx_post('/user/get-aws-creds', json={"id": dataset_id})
+    s3_bucket_path = res['synth_full_dataset_uri']
+    if sample:
+        s3_bucket_path = res['synth_sample_dataset_uri']
+
+    if not os.path.exists(download_dir):
+        create = click.prompt(sbx_style(
+            f"The path `{download_dir}` doesn't exist. Create it and download?"))
+        if create in ['Y', 'y']:
+            os.makedirs(download_dir)
+        else:
+            return
+
+    # boto3 does not support a clean aws sync command so we will download all files manually
+    # approach adapted from adapted from https://emasquil.github.io/posts/multithreading-boto3/
+
+    bucket_name = urlparse(res['dataset_uri']).netloc
+    prefix_path = urlparse(s3_bucket_path).path[1:]  # get rid of leading /
+
+    # Creating only one session and one client
+    session = boto3.Session()
+    client = session.client("s3",
+                            aws_access_key_id=res['access_key'],
+                            aws_secret_access_key=res['secret_key']
+                            )
+    resource = boto3.resource("s3")
+    bucket = resource.Bucket(bucket_name)
+    files_to_download = []
+    click.echo(sbx_style("Setting up directory structure"))
+    for obj in bucket.objects.filter(Prefix=prefix_path):
+        local_filename = os.path.join(download_dir, obj.key)
+        local_file_dir = os.path.dirname(local_filename)
+        if not os.path.exists(local_file_dir):
+            os.makedirs(local_file_dir)
+        files_to_download.append(obj.key)
+
+    # The client is shared between threads
+    func = partial(download_one_file, bucket_name, download_dir, client)
+
+    # List for storing possible failed downloads to retry later
+    failed_downloads = []
+
+    click.echo(sbx_style("Starting download..."))
+    with tqdm(total=len(files_to_download)) as pbar:
+        with ThreadPoolExecutor(max_workers=32) as executor:
+            # Using a dict for preserving the downloaded file for each future, to store it as a failure if we need that
+            futures = {}
+            for file_to_download in files_to_download:
+                if not file_to_download.endswith('/') and not os.path.exists(os.path.join(download_dir, file_to_download)):
+                    futures[executor.submit(
+                        func, file_to_download)] = file_to_download
+
+            for future in as_completed(futures):
+                if future.exception():
+                    failed_downloads.append(futures[future])
+                pbar.update(1)
+    if len(failed_downloads) > 0:
+        click.echo(
+            sbx_style("Some downloads have failed. Try rerunning"))
+    else:
+        click.echo(
+            sbx_style("Dataset Ready!")
+        )
+
 
 #
 # Job commands
