@@ -20,7 +20,7 @@ from tqdm import tqdm
 VERIFY = True
 SBX_API_URL_BASE = "https://app.sbxrobotics.com"
 if os.getenv('SBX_DEV'):
-    print("Running SBX CLI in dev mode. No SSL verification will be used. `export SBX_DEV=` to test for prod")
+    click.echo("Running SBX CLI in dev mode. No SSL verification will be used. `export SBX_DEV=` to test for prod")
     VERIFY = False
     SBX_API_URL_BASE = "https://dev.app.sbxrobotics.com"
 
@@ -146,7 +146,7 @@ def sbx_post(cfg, route, key=None, json=None):
             click.echo(sbx_style(response.text))
             click.echo(sbx_style(
                 f"Are you using an valid API key for the resource you are trying to access? Please enter a key currently listed at {SBX_API_URL_BASE}/settings/account"))
-        elif response.status_code == 400:
+        elif response.status_code in [400, 404]:
             click.echo(sbx_style(response.json()['message']))
         elif response.status_code == 500:
             click.echo(
@@ -246,7 +246,7 @@ def list():
         proj['created_str_utc'],
         proj['name']
     ) for proj in res['projects']]
-    print(tabulate(rows, headers=headers, tablefmt="grid"))
+    click.echo(tabulate(rows, headers=headers, tablefmt="grid"))
 
 
 @project.command()
@@ -257,7 +257,7 @@ def info(project_id):
     res = sbx_post("/project/get", json={"id": project_id})
     if not res:
         return
-    print(tabulate([(k, v) for k, v in res.items()], tablefmt="grid"))
+    click.echo(tabulate([(k, v) for k, v in res.items()], tablefmt="grid"))
 
 
 #
@@ -280,7 +280,7 @@ def list(project_id):
         gen['name'],
         gen['cur_build_name']
     ) for gen in res['generators']]
-    print(tabulate(rows, headers=headers, tablefmt="grid"))
+    click.echo(tabulate(rows, headers=headers, tablefmt="grid"))
 
 
 @generator.command()
@@ -292,7 +292,20 @@ def info(generator_id):
     res = sbx_post("/generator/get", json={"id": generator_id})
     if not res:
         return
-    print(tabulate([(k, v) for k, v in res.items()], tablefmt="grid"))
+    click.echo(tabulate([(k, v) for k, v in res.items()], tablefmt="grid"))
+
+@generator.command()
+@click.argument("generator_id")
+@click.argument("num_frames", type = int)
+@click.argument("scene_args_str")
+def generate(generator_id, num_frames, scene_args_str):
+    """submit a generation job for a synthetic dataset"""
+    check_object_id(generator_id)
+    res = sbx_post("/generator/create-dataset", json={"id": generator_id, "num_frames": num_frames, "scene_args_str": scene_args_str})
+    if not res:
+        return
+    click.echo(sbx_style(f"Success! Use `sbx job info {res['job_id']}` or `sbx job list` to monitor the status of your job."))
+    
 
 #
 # Dataset commands
@@ -315,7 +328,7 @@ def list(project_id):
         ds['created_str_utc'],
         ds['name']
     ) for ds in res['datasets']]
-    print(tabulate(rows, headers=headers, tablefmt="grid"))
+    click.echo(tabulate(rows, headers=headers, tablefmt="grid"))
 
 
 @dataset.command()
@@ -329,7 +342,7 @@ def info(dataset_id):
     res = sbx_post("/dataset/get", json={"id": dataset_id})
     if not res:
         return
-    print(tabulate([(k, v)
+    click.echo(tabulate([(k, v)
           for k, v in res['dataset'].items()], tablefmt="grid"))
 
 
@@ -370,7 +383,7 @@ def download(dataset_id, download_dir, sample):
             return
 
     # boto3 does not support a clean aws sync command so we will download all files manually
-    # approach adapted from adapted from https://emasquil.github.io/posts/multithreading-boto3/
+    # approach adapted from https://emasquil.github.io/posts/multithreading-boto3/
 
     bucket_name = urlparse(res['dataset_uri']).netloc
     prefix_path = urlparse(s3_bucket_path).path[1:]  # get rid of leading /
@@ -447,7 +460,7 @@ def list(project_id):
         ds['name'],
         JobState.get_name(int(ds['state']))
     ) for ds in res['dataset_jobs']]
-    print(tabulate(rows, headers=headers, tablefmt="grid"))
+    click.echo(tabulate(rows, headers=headers, tablefmt="grid"))
 
 
 @job.command()
@@ -456,8 +469,8 @@ def info(job_id):
     """list current running and completed aws jobs
     """
     check_dataset_job_id(job_id)
-    res = sbx_post("/dataset-job/get", json={"id": job_id})
+    res = sbx_post("/dataset-job/get", json={"id": job_id}) 
     if not res:
         return
-    print(tabulate([(k, v)
+    click.echo(tabulate([(k, v)
           for k, v in res['dataset_job'].items()], tablefmt="grid"))
